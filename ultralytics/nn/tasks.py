@@ -75,6 +75,7 @@ from ultralytics.utils.loss import (
     v8OBBLoss,
     v8PoseLoss,
     v8SegmentationLoss,
+    v8CLloss,
 )
 from ultralytics.utils.ops import make_divisible
 from ultralytics.utils.plotting import feature_visualization
@@ -307,6 +308,9 @@ class BaseModel(nn.Module):
             self.criterion = self.init_criterion()
 
         preds = self.forward(batch["img"]) if preds is None else preds
+        if isinstance(preds, tuple) and isinstance(preds[0], list):
+            self.criterion = v8CLloss(self) 
+            return self.criterion(preds[0], preds[1], batch)
         return self.criterion(preds, batch)
 
     def init_criterion(self):
@@ -350,7 +354,15 @@ class DetectionModel(BaseModel):
                     return self.forward(x)["one2many"]
                 return self.forward(x)[0] if isinstance(m, (Segment, Pose, OBB)) else self.forward(x)
 
-            m.stride = torch.tensor([s / x.shape[-2] for x in _forward(torch.zeros(1, ch, s, s))])  # forward
+           # m.stride = torch.tensor([s / (x.shape[-2] if isinstance(x,torch.Tensor) else x[1].shape[-2]) for x in _forward(torch.zeros(1, ch, s, s))])  # forward
+            x_out = _forward(torch.zeros(1, ch, s, s))
+            if len(x_out) > 0 and isinstance(x_out[0], list):
+            # 嵌套的情况，只遍历第一个子 list
+                
+                m.stride = torch.tensor([s / item.shape[-2] for item in x_out[0]])
+            else:
+            
+                m.stride = torch.tensor([s / item.shape[-2] for item in x_out] )
             self.stride = m.stride
             m.bias_init()  # only run once
         else:
@@ -363,7 +375,7 @@ class DetectionModel(BaseModel):
             LOGGER.info("")
 
     def _predict_augment(self, x):
-        """Perform augmentations on input image x and return augmented inference and train outputs."""
+        """Perform augmentations on input image x and return augment                                                                                                                                                                                                                         weeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeesssssssssssssssss inference and train outputs."""
         if getattr(self, "end2end", False) or self.__class__.__name__ != "DetectionModel":
             LOGGER.warning("WARNING ⚠️ Model does not support 'augment=True', reverting to single-scale prediction.")
             return self._predict_once(x)

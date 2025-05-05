@@ -182,7 +182,14 @@ class BaseValidator:
             # Loss
             with dt[2]:
                 if self.training:
-                    self.loss += model.loss(batch, preds)[1]
+                    loss_items = model.loss(batch, preds)[1]
+                    if loss_items.shape != self.loss.shape:
+                        # 如果维度不匹配，创建新的 tensor 并将有效值复制过去
+                        new_loss = torch.zeros_like(self.loss, device=self.device)
+                        new_loss[:min(loss_items.shape[0], self.loss.shape[0])] = loss_items[:min(loss_items.shape[0], self.loss.shape[0])]
+                        self.loss += new_loss
+                    else:
+                        self.loss += loss_items
 
             # Postprocess
             with dt[3]:

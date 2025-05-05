@@ -65,11 +65,11 @@ class Detect(nn.Module):
         """Concatenates and returns predicted bounding boxes and class probabilities."""
         if self.end2end:
             return self.forward_end2end(x)
-
+        x_ = [t.clone() for t in x]
         for i in range(self.nl):
             x[i] = torch.cat((self.cv2[i](x[i]), self.cv3[i](x[i])), 1)
         if self.training:  # Training path
-            return x
+            return (x_,x)
         y = self._inference(x)
         return y if self.export else (y, x)
 

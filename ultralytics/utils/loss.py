@@ -3,7 +3,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
+from torchvision.ops import roi_align
 from ultralytics.utils.metrics import OKS_SIGMA
 from ultralytics.utils.ops import crop_mask, xywh2xyxy, xyxy2xywh
 from ultralytics.utils.tal import RotatedTaskAlignedAssigner, TaskAlignedAssigner, dist2bbox, dist2rbox, make_anchors
@@ -11,7 +11,9 @@ from ultralytics.utils.torch_utils import autocast
 
 from .metrics import bbox_iou, probiou
 from .tal import bbox2dist
-
+import numpy as np
+import cv2
+import matplotlib.pyplot as plt
 
 class VarifocalLoss(nn.Module):
     """
@@ -152,6 +154,611 @@ class KeypointLoss(nn.Module):
         # e = d / (2 * (area * self.sigmas) ** 2 + 1e-9)  # from formula
         e = d / ((2 * self.sigmas).pow(2) * (area + 1e-9) * 2)  # from cocoeval
         return (kpt_loss_factor.view(-1, 1) * ((1 - torch.exp(-e)) * kpt_mask)).mean()
+    
+
+class RPFeatureExtractor:
+    """
+    基于RP特征的对象特征提取器。
+    
+    RP是输入检测器前的原始特征图，通常是backbone的输出。
+    这个提取器基于真实边界框或预测边界框，直接从RP特征图上提取对象特征。
+    """
+    
+    def __init__(self, use_gt_boxes=True, feature_type='roi', roi_size=7):
+        """
+        初始化RP特征提取器。
+        
+        Args:
+            use_gt_boxes (bool): 是否使用真实边界框
+            feature_type (str): 特征提取类型，可选 'center'(中心点) 或 'roi'(区域池化)
+            roi_size (int): ROI池化后的大小
+        """
+        self.use_gt_boxes = use_gt_boxes
+        self.feature_type = feature_type
+        self.roi_size = roi_size
+        
+    def extract_center_features(self, rp_features, boxes, img_size, device):
+        """
+        通过边界框中心点从RP特征图中提取特征。
+        
+        Args:
+            rp_features (torch.Tensor): RP特征图，shape [batch_size, channels, height, width]
+            boxes (torch.Tensor): 边界框坐标 (xyxy格式)
+            img_size (tuple): 原始图像尺寸 (height, width)
+            device (torch.device): 计算设备
+            
+        Returns:
+            torch.Tensor: 中心点特征，shape [num_boxes, channels]
+        """
+        if boxes.shape[0] == 0:
+            return torch.zeros((0, rp_features.shape[1]), device=device)
+            
+        # 获取特征图尺寸
+        _, channels, height, width = rp_features.shape
+        
+        # 计算中心点坐标
+        center_x = ((boxes[:, 0] + boxes[:, 2]) / 2)
+        center_y = ((boxes[:, 1] + boxes[:, 3]) / 2)
+        
+        # 将原图坐标映射到特征图坐标
+        #img_size_tensor = torch.tensor(img_size, device=device)
+        center_x = (center_x * width / img_size[1]).long().clamp(0, width - 1)
+        center_y = (center_y * height / img_size[0]).long().clamp(0, height - 1)
+        
+        # 提取中心点特征
+        batch_idx = boxes[:, -1].long() if boxes.shape[1] > 4 else torch.zeros_like(center_x)
+        features = rp_features[batch_idx, :, center_y, center_x]
+        
+        return features
+    
+    def extract_roi_features(self, rp_features, boxes, img_size, device):
+        """
+        通过ROI池化从RP特征图中提取区域特征。
+        
+        Args:
+            rp_features (torch.Tensor): RP特征图，shape [batch_size, channels, height, width]
+            boxes (torch.Tensor): 边界框坐标 [batch_idx, bboxes, cls]
+            img_size (tuple): 原始图像尺寸 (height, width)
+            device (torch.device): 计算设备
+            
+        Returns:
+            torch.Tensor: 池化后的区域特征，shape [num_boxes, channels]
+        """
+        if boxes.shape[0] == 0:
+            return torch.zeros((0, rp_features.shape[1]), device=device)
+            
+        # 获取特征图尺寸
+        batch_size, channels, height, width = rp_features.shape
+        
+        # 归一化边界框坐标到[0,1]范围
+        #img_size_tensor = torch.tensor(img_size, device=device)
+        norm_boxes = boxes.clone()
+        norm_boxes[:, [1, 3]] /= img_size[1]  # x坐标除以宽度
+        norm_boxes[:, [2, 4]] /= img_size[0]  # y坐标除以高度
+        
+        # 构建ROI批次索引
+        batch_idx = boxes[:, -1].long() if boxes.shape[1] > 4 else torch.zeros_like(boxes[:, 0])
+        rois = torch.cat([batch_idx.unsqueeze(1), norm_boxes[:, :4]], dim=1)
+        rois = torch.cat([batch_idx.unsqueeze(1), norm_boxes[:, 1:5]], dim=1)
+        # 执行ROI池化
+        try:
+            from torchvision.ops import roi_align
+            roi_features = roi_align(rp_features, rois, (self.roi_size, self.roi_size))
+        except ImportError:
+            # 简化的替代方案
+            roi_features = []
+            for i in range(len(rois)):
+                b = batch_idx[i]
+                x1, y1, x2, y2 = (norm_boxes[i, :4] * torch.tensor([width, height, width, height],
+                                                               device=device)).long()
+                # 裁剪并调整大小
+                if x1 == x2:
+                    x2 = x1 + 1
+                if y1 == y2:
+                    y2 = y1 + 1
+                    
+                crop = rp_features[b, :, y1:y2, x1:x2]
+                if 0 not in crop.shape[1:]:  # 确保裁剪区域有效
+                    pool = F.adaptive_avg_pool2d(crop, (1, 1))
+                    roi_features.append(pool)
+            
+            if roi_features:
+                roi_features = torch.cat(roi_features, dim=0)
+            else:
+                roi_features = torch.zeros((0, channels, 1, 1), device=device)
+        
+        # 转换为特征向量
+        roi_features = roi_features.view(roi_features.size(0), -1)
+        
+        return roi_features
+    
+    def extract_features_from_gt(self, rp_features, batch, img_size, device):
+        """
+        从真实边界框中提取RP特征。
+        
+        Args:
+            rp_features (torch.Tensor): RP特征图
+            batch (dict): 批次数据，包含"batch_idx", "cls", "bboxes"等
+            img_size (tuple): 原始图像尺寸 (height, width)
+            device (torch.device): 计算设备
+            
+        Returns:
+            tuple: (features, labels) - 提取的特征和对应的类别标签
+        """
+        if "batch_idx" not in batch or "cls" not in batch or "bboxes" not in batch:
+            return torch.zeros((0, rp_features.shape[1]), device=device), torch.zeros((0,), device=device, dtype=torch.long)
+            
+        # 构建GT框信息：[batch_idx, x1, y1, x2, y2, class_id]
+        batch_idx = batch["batch_idx"].view(-1, 1)
+        cls = batch["cls"].view(-1, 1)
+        
+        # # 处理边界框格式 - 保证使用xyxy格式
+        # bboxes = batch["bboxes"].clone()
+        # #if bboxes.shape[1] == 4:  # 如果是xywh格式
+        #     # 中心点坐标和宽高转换为左上右下
+        # x1y1 = bboxes[:, :2] - bboxes[:, 2:] / 2
+        # x2y2 = bboxes[:, :2] + bboxes[:, 2:] / 2
+        # bboxes = torch.cat([x1y1, x2y2], dim=1)
+        bboxes = xywh2xyxy(batch["bboxes"])
+        # 将相对坐标转换为绝对坐标
+        #img_size_tensor = torch.tensor(img_size, device=device)
+        bboxes[:, [0, 2]] *= img_size[1]  # x坐标乘以宽度
+        bboxes[:, [1, 3]] *= img_size[0]  # y坐标乘以高度
+
+#         import matplotlib.patches as patches
+
+# # 假设 batch["img"] 是一个 PyTorch 张量
+#         image = batch["img"][0].permute(1, 2, 0).cpu().numpy()  # 转换为 NumPy 格式
+
+#         # 创建图像显示
+#         plt.figure(figsize=(10, 10))
+#         plt.imshow(image)
+
+#         # 绘制边界框
+#         for bbox in bboxes:
+#             x1, y1, x2, y2 = map(int, bbox[:4])
+#             # 创建矩形
+#             rect = patches.Rectangle(
+#                 (x1, y1), 
+#                 x2 - x1,  # width
+#                 y2 - y1,  # height
+#                 linewidth=2,
+#                 edgecolor='g',
+#                 facecolor='none'
+#             )
+#             plt.gca().add_patch(rect)
+#             break
+#         plt.axis("off")
+#         plt.show()
+        
+
+        gt_info = torch.cat([batch_idx, bboxes, cls], dim=1).to(device)
+        
+        # 排除无效样本（边界框为零或负值的）
+        valid_mask = (bboxes[:, 2] > bboxes[:, 0]) & (bboxes[:, 3] > bboxes[:, 1])
+        if not valid_mask.all():
+            gt_info = gt_info[valid_mask]
+            
+        # 根据特征类型提取特征
+        if self.feature_type == 'center':
+            features = self.extract_center_features(rp_features, gt_info, img_size, device)
+        else:  # 'roi'
+            features = self.extract_roi_features(rp_features, gt_info, img_size, device)
+            
+        # 提取类别标签
+        labels = gt_info[:, -1].long()
+        
+        return features, labels
+
+
+
+class RPContrastiveLoss(nn.Module):
+    """
+    基于RP特征的对象级别对比损失。
+    
+    这个损失直接从backbone输出的RP特征图中提取对象特征，
+    而不是使用检测器的后续特征，从而更直接地改进backbone的特征表示能力。
+    """
+    
+    def __init__(
+        self,
+        temperature=0.5,
+        feature_dim=256,
+        num_classes=80,
+        memory_size=1024,
+        use_memory_bank=True,
+        use_gt_boxes=True,
+        feature_type='roi',
+        roi_size=5,
+        encode_dim = 1024
+    ):
+        """
+        初始化RP对比损失。
+        
+        Args:
+            temperature (float): 温度参数
+            feature_dim (int): 特征维度（应与RP特征的通道数匹配）
+            num_classes (int): 类别数量
+            memory_size (int): 内存库大小
+            use_memory_bank (bool): 是否使用内存特征库
+            use_gt_boxes (bool): 是否使用真实边界框
+            feature_type (str): 特征提取类型 ('center' 或 'roi')
+        """
+        super().__init__()
+        self.temperature = temperature
+        self.feature_dim = feature_dim
+        self.num_classes = num_classes
+        self.use_memory_bank = use_memory_bank
+        
+        # 特征提取器
+        self.feature_extractor = RPFeatureExtractor(
+            use_gt_boxes=use_gt_boxes,
+            feature_type=feature_type,
+            roi_size=5
+        )
+        
+        self.dim = 256
+        self.hidden_dim = 2048
+        # 初始化内存特征库
+        if self.use_memory_bank:
+            self.register_buffer('memory_bank', torch.zeros(num_classes, memory_size, self.dim))
+            self.register_buffer('memory_count', torch.zeros(num_classes, dtype=torch.long))
+            self.memory_size = memory_size
+        
+        # 类别权重
+        self.register_buffer('class_weights', torch.ones(num_classes))
+        self.register_buffer('class_freq', torch.zeros(num_classes))
+        self.total_samples = 0
+
+
+        self.feature_projection = nn.Sequential(
+            nn.Linear(encode_dim, self.hidden_dim),  # 保持输入输出维度一致，仅用于示例
+            nn.ReLU(),
+            nn.Linear(self.hidden_dim, self.dim)   # 最终输出到预设维度
+        )
+            
+    def update_memory_bank(self, features, labels):
+        """更新内存特征库"""
+        if not self.use_memory_bank:
+            return
+            
+        for i in range(len(labels)):
+            label = labels[i].item()
+            if label >= self.num_classes:
+                continue
+                
+            # 更新类别频率
+            self.class_freq[label] += 1
+            self.total_samples += 1
+            
+            # 确定在内存库中的位置
+            idx = self.memory_count[label] % self.memory_size
+            self.memory_bank[label, idx] = features[i].detach().clone()
+            self.memory_count[label] += 1
+            
+        # 更新类别权重
+        if self.total_samples > 0:
+            cls_prob = self.class_freq / self.total_samples
+            cls_prob = torch.clamp(cls_prob, min=1e-8)
+            self.class_weights = 1.0 / torch.sqrt(cls_prob + 1e-8)
+            self.class_weights = self.class_weights / self.class_weights.mean()
+    
+    def get_memory_features(self, labels):
+        """从内存库获取特征"""
+        if not self.use_memory_bank:
+            return None, None
+            
+        unique_labels = torch.unique(labels)
+        all_features = []
+        all_labels = []
+        
+        for label in unique_labels:
+            if label >= self.num_classes:
+                continue
+                
+            count = min(self.memory_count[label].item(), self.memory_size)
+            if count <= 0:
+                continue
+                
+            features = self.memory_bank[label, :count]
+            all_features.append(features)
+            all_labels.append(torch.full((count,), label, device=labels.device))
+        
+        if not all_features:
+            return None, None
+            
+        memory_features = torch.cat(all_features, dim=0)
+        memory_labels = torch.cat(all_labels, dim=0)
+        
+        return memory_features, memory_labels
+    
+    def forward(self, rp_features, batch, img_size):
+        """
+        前向传播计算对比损失。
+        
+        Args:
+            rp_features (torch.Tensor): RP特征图，shape [batch_size, channels, height, width]
+            batch (dict): 批次数据
+            img_size (tuple): 原始图像尺寸 (height, width)
+            
+        Returns:
+            torch.Tensor: 对比损失值
+        """
+        device = rp_features.device
+        
+        # 检查特征维度是否与初始化时指定的一致
+        
+        
+        # 使用GT框提取特征
+        features, labels = self.feature_extractor.extract_features_from_gt(
+            rp_features, batch, img_size, device
+        )
+
+       
+        self.feature_projection=self.feature_projection.to(features.device)
+        features = self.feature_projection(features)
+        # 如果有效特征数量不足，返回零损失
+        if features.shape[0] <= 1:
+            return torch.tensor(0.0, device=device)
+        
+        # 标准化特征
+        features = features + 1e-8
+        features = F.normalize(features, p=2, dim=1)
+        if self.use_memory_bank and features.shape[-1] != self.memory_bank.shape[-1]:
+            self.feature_dim = features.shape[1]
+            
+            # 如果使用内存库，需要重置
+            if self.use_memory_bank:
+                self.register_buffer('memory_bank', torch.zeros(self.num_classes, self.memory_size, self.feature_dim, 
+                                                              device=device))
+                self.register_buffer('memory_count', torch.zeros(self.num_classes, dtype=torch.long, device=device))
+        # 更新内存特征库并获取额外样本
+        self.memory_bank = self.memory_bank.to(device)
+        self.memory_count = self.memory_count.to(device)
+        if self.use_memory_bank:
+            self.update_memory_bank(features, labels)
+            memory_features, memory_labels = self.get_memory_features(labels)
+            
+            if memory_features is not None:
+                aug_features = torch.cat([features, memory_features], dim=0)
+                aug_labels = torch.cat([labels, memory_labels], dim=0)
+            else:
+                aug_features = features
+                aug_labels = labels
+        else:
+            aug_features = features
+            aug_labels = labels
+        
+        # 检查每个类别的样本数
+        unique_labels, label_counts = torch.unique(aug_labels, return_counts=True)
+        valid_classes = unique_labels[label_counts >= 2]  # 每个类别至少需要2个样本
+        
+        # 如果没有有效类别，返回零损失
+        if len(valid_classes) == 0:
+            return torch.tensor(0.0, device=device)
+        
+        # 只保留有效类别的样本
+        valid_mask = torch.zeros_like(aug_labels, dtype=torch.bool)
+        for cls in valid_classes:
+            valid_mask = valid_mask | (aug_labels == cls)
+            
+        valid_features = aug_features[valid_mask]
+        valid_labels = aug_labels[valid_mask]
+        
+        # 计算相似度矩阵
+        similarity_matrix = torch.matmul(valid_features, valid_features.T) / self.temperature
+        
+        # 创建正负样本掩码
+        labels_matrix = valid_labels.view(-1, 1)
+        positive_mask = (labels_matrix == valid_labels.view(1, -1)).float()
+        
+        # 移除自相似度（对角线）
+        positive_mask = positive_mask - torch.eye(positive_mask.shape[0], device=device)
+        
+        # 应用类别权重
+        sample_weights = torch.ones_like(valid_labels, dtype=torch.float)
+        for i, label in enumerate(valid_labels):
+            if label < self.num_classes:
+                sample_weights[i] = self.class_weights[label]
+                
+        # 计算加权对比损失
+        exp_logits = torch.exp(similarity_matrix)
+        exp_logits = exp_logits - torch.diag(torch.diag(exp_logits))  # 移除对角线
+        
+        # 计算正样本对的损失
+        pos_exp_sum = torch.sum(exp_logits * positive_mask, dim=1)
+        all_exp_sum = torch.sum(exp_logits, dim=1)
+        
+        # 处理可能的零值
+        valid_pos = pos_exp_sum > 0
+        if not valid_pos.any():
+            return torch.tensor(0.0, device=device)
+            
+        pos_probs = torch.zeros_like(pos_exp_sum)
+        pos_probs[valid_pos] = pos_exp_sum[valid_pos] / (all_exp_sum[valid_pos] + 1e-8)
+        
+        log_probs = torch.zeros_like(pos_probs)
+        log_probs[valid_pos] = torch.log(pos_probs[valid_pos] + 1e-8)
+        
+        loss = -log_probs * sample_weights
+        
+        # 返回加权平均损失
+        return loss.sum() / (sample_weights.sum() + 1e-8)
+    
+
+class v8CLloss:
+    def __init__(self, model, tal_topk=10,contrastive_weight=0.5,
+        memory_size=1024,
+        use_gt_boxes=True,
+        feature_type='roi',
+        roi_size=5,):  
+        # model must be de-paralleled
+        
+        """Initializes v8DetectionLoss with the model, defining model-related properties and BCE loss function."""
+        device = next(model.parameters()).device  # get model device
+        h = model.args  # hyperparameters
+
+        m = model.model[-1]  # Detect() module
+        self.bce = nn.BCEWithLogitsLoss(reduction="none")
+        self.hyp = h
+        self.stride = m.stride  # model strides
+        self.nc = m.nc  # number of classes
+        self.no = m.nc + m.reg_max * 4
+        self.reg_max = m.reg_max
+        self.device = device
+
+        self.use_dfl = m.reg_max > 1
+
+        self.assigner = TaskAlignedAssigner(topk=tal_topk, num_classes=self.nc, alpha=0.5, beta=6.0)
+        self.bbox_loss = BboxLoss(m.reg_max).to(device)
+        self.proj = torch.arange(m.reg_max, dtype=torch.float, device=device)
+
+        # self.contrastive_loss = RobustContrastiveLoss(
+        #     temperature=0.5,
+        #     feature_dim=256,  # 可以根据模型调整
+        #     num_classes=self.nc,
+        #     memory_size=memory_size,
+        #     use_memory_bank=use_memory_bank
+        # )
+
+        try:
+            if hasattr(model.model, 'backbone'):
+                # 尝试从主干网络获取
+                feature_layers = [m for m in model.model.backbone.modules() if isinstance(m, nn.Conv2d)]
+                feature_dim = feature_layers[-1].out_channels if feature_layers else 256
+            else:
+                feature_dim = m.reg_max * 4  # 默认值
+        except:
+            feature_dim = m.reg_max * 4  # 默认值
+
+        self.rp_contrastive = RPContrastiveLoss(
+            temperature=0.5,
+            feature_dim=feature_dim,  # 会在第一次运行时动态调整
+            num_classes=self.nc,
+            memory_size=memory_size,
+            use_memory_bank=True,
+            use_gt_boxes=use_gt_boxes,
+            feature_type=feature_type,
+            encode_dim=roi_size*roi_size*feature_dim,  # 可以根据需要调整
+        )
+        
+
+        
+        self.contrastive_weight = contrastive_weight
+
+    def preprocess(self, targets, batch_size, scale_tensor):
+        """Preprocesses the target counts and matches with the input batch size to output a tensor."""
+        nl, ne = targets.shape
+        if nl == 0:
+            out = torch.zeros(batch_size, 0, ne - 1, device=self.device)
+        else:
+            i = targets[:, 0]  # image index
+            _, counts = i.unique(return_counts=True)
+            counts = counts.to(dtype=torch.int32)
+            out = torch.zeros(batch_size, counts.max(), ne - 1, device=self.device)
+            for j in range(batch_size):
+                matches = i == j
+                n = matches.sum()
+                if n:
+                    out[j, :n] = targets[matches, 1:]
+            out[..., 1:5] = xywh2xyxy(out[..., 1:5].mul_(scale_tensor))
+        return out
+
+    def bbox_decode(self, anchor_points, pred_dist):
+        """Decode predicted object bounding box coordinates from anchor points and distribution."""
+        if self.use_dfl:
+            b, a, c = pred_dist.shape  # batch, anchors, channels
+            pred_dist = pred_dist.view(b, a, 4, c // 4).softmax(3).matmul(self.proj.type(pred_dist.dtype))
+            # pred_dist = pred_dist.view(b, a, c // 4, 4).transpose(2,3).softmax(3).matmul(self.proj.type(pred_dist.dtype))
+            # pred_dist = (pred_dist.view(b, a, c // 4, 4).softmax(2) * self.proj.type(pred_dist.dtype).view(1, 1, -1, 1)).sum(2)
+        return dist2bbox(pred_dist, anchor_points, xywh=False)
+
+  
+    
+    def __call__(self, rp, preds, batch):
+        """Calculate the sum of the loss for box, cls and dfl multiplied by batch size."""
+        loss = torch.zeros(3, device=self.device)  # box, cls, dfl
+        feats = preds[1] if isinstance(preds, tuple) else preds
+        pred_distri, pred_scores = torch.cat([xi.view(feats[0].shape[0], self.no, -1) for xi in feats], 2).split(
+            (self.reg_max * 4, self.nc), 1
+        )
+
+        pred_scores = pred_scores.permute(0, 2, 1).contiguous() # b*8400*nc
+        pred_distri = pred_distri.permute(0, 2, 1).contiguous()
+
+        dtype = pred_scores.dtype
+        batch_size = pred_scores.shape[0]
+        imgsz = torch.tensor(feats[0].shape[2:], device=self.device, dtype=dtype) * self.stride[0]  # image size (h,w)
+        anchor_points, stride_tensor = make_anchors(feats, self.stride, 0.5)  
+        # 返回list anchorpoints 每个尺度的anchor点坐标和对应的stride 例 [ 0.5000,  0.5000] 到  [39.5000, 39.5000],
+        # 和每个尺度对应的stride [8, 16, 32]，每个尺度的stride是一样的 维度是  6400*2, 1600*2, 400*2 和 6400*1,  1600, 400
+
+        # Targets
+        targets = torch.cat((batch["batch_idx"].view(-1, 1), batch["cls"].view(-1, 1), batch["bboxes"]), 1)
+        targets = self.preprocess(targets.to(self.device), batch_size, scale_tensor=imgsz[[1, 0, 1, 0]]) # 将 max*6 维度的target信息
+        # 变成 batch*max*5 维度的target信息
+        gt_labels, gt_bboxes = targets.split((1, 4), 2)  # cls, xyxy
+        mask_gt = gt_bboxes.sum(2, keepdim=True).gt_(0.0) #b*max*1 #通过检测最大值是否为0来确认 是不是有效的target
+
+        # Pboxes
+        pred_bboxes = self.bbox_decode(anchor_points, pred_distri)  # xyxy, (b, h*w, 4) 通过预测一个regmax的distribution的期望来预测相对与anchor points的
+        # 左上角和右下的偏移量
+        # dfl_conf = pred_distri.view(batch_size, -1, 4, self.reg_max).detach().softmax(-1)
+        # dfl_conf = (dfl_conf.amax(-1).mean(-1) + dfl_conf.amax(-1).amin(-1)) / 2
+
+        _, target_bboxes, target_scores, fg_mask, _ = self.assigner(
+            # pred_scores.detach().sigmoid() * 0.8 + dfl_conf.unsqueeze(-1) * 0.2,
+            pred_scores.detach().sigmoid(),
+            (pred_bboxes.detach() * stride_tensor).type(gt_bboxes.dtype),
+            anchor_points * stride_tensor,
+            gt_labels,
+            gt_bboxes,
+            mask_gt,
+        )
+
+        target_scores_sum = max(target_scores.sum(), 1)
+        
+        # Cls loss
+        # loss[1] = self.varifocal_loss(pred_scores, target_scores, target_labels) / target_scores_sum  # VFL way
+        loss[1] = self.bce(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum  # BCE
+
+        # Bbox loss
+        if fg_mask.sum():
+            target_bboxes /= stride_tensor
+            loss[0], loss[2] = self.bbox_loss(
+                pred_distri, pred_bboxes, anchor_points, target_bboxes, target_scores, target_scores_sum, fg_mask
+            )
+
+        loss[0] *= self.hyp.box  # box gain
+        loss[1] *= self.hyp.cls  # cls gain
+        loss[2] *= self.hyp.dfl  # dfl gain
+
+       
+        # if isinstance(rp, list) and len(rp)>=3:
+        #     c_features = rp[0]  # [b, 256, 20, 20]
+        #     if "cls" in batch and batch["cls"] is not None:
+        #         labels = batch["cls"].to(self.device).flatten()
+        #         valid_mask = labels >= 0  # 过滤无效标签
+        rp = rp[0] if isinstance(rp, list) else rp  # [b, 256, 20, 20]
+        if rp is not None and isinstance(rp, torch.Tensor):
+            # 获取图像尺寸
+            if hasattr(self, 'stride'):
+                imgsz = torch.tensor(rp.shape[2:], device=self.device) * self.stride[0]
+            else:
+                # 如果无法获取stride，使用特征图尺寸的估计
+                imgsz = torch.tensor([s * 8 for s in rp.shape[2:]], device=self.device)
+            
+            # 计算对比损失
+            cl_loss = self.rp_contrastive(rp, batch, (imgsz[0].item(), imgsz[1].item()))
+            
+            # 组合损失
+            total_loss = loss.sum() * batch_size + self.contrastive_weight * cl_loss
+            
+            # 添加对比损失到记录项
+            loss_items = torch.cat([loss.detach(), cl_loss.detach().unsqueeze(0)])
+            return total_loss, loss_items
+
+        return loss.sum() * batch_size, loss.detach()  # loss(box, cls, dfl)
 
 
 class v8DetectionLoss:
