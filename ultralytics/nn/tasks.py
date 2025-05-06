@@ -88,7 +88,7 @@ from ultralytics.utils.torch_utils import (
     scale_img,
     time_sync,
 )
-from ultralytics.nn.extra_modules import (fasternet_t0,fasternet_t0_dw,fasternet_t1_dw,fasternet_t1
+from ultralytics.nn.extra_modules import (fasternet_t0,fasternet_t0_dw,fasternet_t1_dw,fasternet_t1,fasternet_l
                                           )
 
 try:
@@ -1067,7 +1067,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                 legacy = False
                 if scale in "mlx":
                     args[3] = True
-        elif m in {fasternet_t0,fasternet_t0_dw,fasternet_t1_dw,fasternet_t1,}:
+        elif m in {fasternet_t0,fasternet_t0_dw,fasternet_t1_dw,fasternet_t1,fasternet_l}:
             m = m(*args)
             c2 = m.channel
         elif m is AIFI:
