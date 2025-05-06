@@ -309,7 +309,8 @@ class BaseModel(nn.Module):
 
         preds = self.forward(batch["img"]) if preds is None else preds
         if isinstance(preds, tuple) and isinstance(preds[0], list):
-            self.criterion = v8CLloss(self) 
+            inter_dim = preds[0][0].shape[1]  # intermediate dimension
+            self.criterion = v8CLloss(self,inter_dim=inter_dim)  # initialize loss function
             return self.criterion(preds[0], preds[1], batch)
         return self.criterion(preds, batch)
 

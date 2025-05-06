@@ -591,7 +591,8 @@ class v8CLloss:
         memory_size=1024,
         use_gt_boxes=True,
         feature_type='roi',
-        roi_size=5,):  
+        roi_size=5,
+        inter_dim=256,):  
         # model must be de-paralleled
         
         """Initializes v8DetectionLoss with the model, defining model-related properties and BCE loss function."""
@@ -621,15 +622,16 @@ class v8CLloss:
         #     use_memory_bank=use_memory_bank
         # )
 
-        try:
-            if hasattr(model.model, 'backbone'):
-                # 尝试从主干网络获取
-                feature_layers = [m for m in model.model.backbone.modules() if isinstance(m, nn.Conv2d)]
-                feature_dim = feature_layers[-1].out_channels if feature_layers else 256
-            else:
-                feature_dim = m.reg_max * 4  # 默认值
-        except:
-            feature_dim = m.reg_max * 4  # 默认值
+        # try:
+        #     if hasattr(model.model, 'backbone'):
+        #         # 尝试从主干网络获取
+        #         feature_layers = [m for m in model.model.backbone.modules() if isinstance(m, nn.Conv2d)]
+        #         feature_dim = feature_layers[-1].out_channels if feature_layers else 256
+        #     else:
+        #         feature_dim = m.reg_max * 4  # 默认值
+        # except:
+        #     feature_dim = m.reg_max * 4  # 默认值
+        feature_dim = inter_dim  # 直接使用inter_dim作为特征维度
 
         self.rp_contrastive = RPContrastiveLoss(
             temperature=0.5,
@@ -639,7 +641,7 @@ class v8CLloss:
             use_memory_bank=True,
             use_gt_boxes=use_gt_boxes,
             feature_type=feature_type,
-            encode_dim=roi_size*roi_size*feature_dim,  # 可以根据需要调整
+            encode_dim=roi_size*roi_size*inter_dim,  # 可以根据需要调整
         )
         
 
