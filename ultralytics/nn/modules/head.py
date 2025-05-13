@@ -3,11 +3,11 @@
 
 import copy
 import math
-
+from typing import List
 import torch
 import torch.nn as nn
 from torch.nn.init import constant_, xavier_uniform_
-
+from ultralytics.utils.ops import xywh2xyxy
 from ultralytics.utils.tal import TORCH_1_10, dist2bbox, dist2rbox, make_anchors
 
 from .block import DFL, BNContrastiveHead, ContrastiveHead, Proto
@@ -15,7 +15,7 @@ from .conv import Conv, DWConv
 from .transformer import MLP, DeformableTransformerDecoder, DeformableTransformerDecoderLayer
 from .utils import bias_init_with_prob, linear_init
 
-__all__ = "Detect", "Segment", "Pose", "Classify", "OBB", "RTDETRDecoder", "v10Detect"
+__all__ = "Detect", "Segment", "Pose", "Classify", "OBB", "RTDETRDecoder", "v10Detect", "DetectWithObjectMoCo"
 
 
 class Detect(nn.Module):
@@ -170,6 +170,255 @@ class Detect(nn.Module):
         scores, index = scores.flatten(1).topk(min(max_det, anchors))
         i = torch.arange(batch_size)[..., None]  # batch indices
         return torch.cat([boxes[i, index // nc], scores[..., None], (index % nc)[..., None].float()], dim=-1)
+
+# ... existing imports ...
+from torchvision.ops import roi_align
+import torch.nn.functional as F
+
+class DetectWithObjectMoCo(Detect):
+    def __init__(self, nc=80, ch=(), queue_size=16, momentum=0.999, feature_dim=256, roi_output_size=7):
+        """
+        Detection head with MoCo for object-level contrastive learning.
+        Args:
+            nc (int): Number of classes for detection and MoCo queue.
+            ch (tuple): Tuple of input channels for each FPN level from the neck.
+                        E.g., (c_p3, c_p4, c_p5).
+            queue_size (int): Size of the MoCo queue per class.
+            momentum (float): Momentum for updating the key encoder.
+            feature_dim (int): Dimension of the encoded object features for MoCo.
+            roi_output_size (int): Output spatial size of RoIAlign (e.g., 7 for 7x7).
+        """
+        super().__init__(nc=nc, ch=ch)  # Initialize parent Detect class
+
+        self.feature_dim = feature_dim
+        self.roi_output_size = roi_output_size
+        self.momentum = momentum
+        self.queue_size = queue_size
+        self.nc = nc
+
+        # Determine the number of channels of the feature map used for RoIAlign.
+        # We'll use the feature map from the first FPN level (e.g., P3),
+        # which corresponds to ch[0] if ch is (c_p3, c_p4, c_p5).
+        if not isinstance(ch, (list, tuple)) or not ch:
+            raise ValueError("`ch` must be a non-empty list or tuple of channel numbers.")
+        c_feat_map_for_roi = ch[0]
+
+        # Define Query and Key Encoders
+        # Input: [N, c_feat_map_for_roi, roi_output_size, roi_output_size]
+        # Output: [N, feature_dim]
+        common_encoder_layers = lambda in_c: nn.Sequential(
+            nn.Conv2d(in_c, self.feature_dim, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(self.feature_dim),
+            nn.ReLU(inplace=True),
+            nn.AdaptiveAvgPool2d((1, 1)),  # Output: [N, feature_dim, 1, 1]
+            nn.Flatten(),  # Output: [N, feature_dim]
+            # MoCo projection head
+            nn.Linear(self.feature_dim, self.feature_dim, bias=False),
+            nn.BatchNorm1d(self.feature_dim), # BN after linear for projection
+            nn.ReLU(inplace=True),
+            nn.Linear(self.feature_dim, self.feature_dim, bias=True) # Final projection
+        )
+        self.query_encoder = common_encoder_layers(c_feat_map_for_roi)
+        self.key_encoder = common_encoder_layers(c_feat_map_for_roi)
+
+        # Initialize key_encoder with query_encoder weights and stop its gradients
+        for param_q, param_k in zip(self.query_encoder.parameters(), self.key_encoder.parameters()):
+            param_k.data.copy_(param_q.data)
+            param_k.requires_grad = False
+
+        # MoCo Queue for negative keys (one queue per class)
+        self.register_buffer('queue', torch.randn(self.nc, self.queue_size, self.feature_dim))
+        self.queue = F.normalize(self.queue, p=2, dim=2)  # Normalize features in the queue
+        self.register_buffer('queue_ptr', torch.zeros(self.nc, dtype=torch.long))
+
+        # Optional: For class frequency statistics (if needed by other parts of your code)
+        self.register_buffer('class_freq', torch.zeros(self.nc))
+        self.total_samples = 0
+    
+    @torch.no_grad()
+    def _momentum_update_key_encoder(self):
+        """Momentum update of the key encoder."""
+        for param_q, param_k in zip(self.query_encoder.parameters(), self.key_encoder.parameters()):
+            param_k.data = param_k.data * self.momentum + param_q.data * (1.0 - self.momentum)
+    
+    @torch.no_grad()
+    def _dequeue_and_enqueue(self, encoded_key_features, object_labels):
+        """
+        Dequeue oldest features and enqueue new key features for each class.
+        Args:
+            encoded_key_features (torch.Tensor): Encoded and L2-normalized key features [num_objects, feature_dim].
+            object_labels (torch.Tensor): Object class labels [num_objects].
+        """
+        for i, label_val in enumerate(object_labels):
+            label = int(label_val.item())
+            if not (0 <= label < self.nc): # Ensure label is valid
+                continue
+            
+            # Optional: Update class frequency (if you use it elsewhere)
+            # self.class_freq[label] += 1
+            # self.total_samples += 1
+            
+            ptr = int(self.queue_ptr[label])
+            self.queue[label, ptr] = encoded_key_features[i] # Enqueue the new key feature
+            self.queue_ptr[label] = (ptr + 1) % self.queue_size # Move pointer
+
+    def _extract_roi_encoded_features(self,
+                                      feature_maps_from_neck: List[torch.Tensor],
+                                      bboxes_abs_img_scale: torch.Tensor,
+                                      batch_indices_for_roi: torch.Tensor,
+                                      current_batch_img_shapes: torch.Tensor,
+                                      encoder: nn.Module):
+        """
+        Extracts RoI features, encodes them, and normalizes.
+        Args:
+            feature_maps_from_neck (List[torch.Tensor]): List of FPN feature maps [P3, P4, P5,...].
+            bboxes_abs_img_scale (torch.Tensor): Absolute GT bounding boxes [N_roi, 4] (xyxy) on original image scale.
+            batch_indices_for_roi (torch.Tensor): Batch index for each RoI [N_roi].
+            current_batch_img_shapes (torch.Tensor): Shapes of images in the current batch [BatchSize, 2] (H, W).
+            encoder (nn.Module): The encoder module (query_encoder or key_encoder).
+        Returns:
+            torch.Tensor: L2-normalized encoded object features [N_roi, feature_dim].
+        """
+        if bboxes_abs_img_scale.numel() == 0:
+            return torch.empty(0, self.feature_dim, device=feature_maps_from_neck[0].device)
+
+        # Use the P3 feature map (smallest stride, highest resolution) for RoIAlign
+        selected_feature_map = feature_maps_from_neck[0]
+        _bs, _c_fm, h_fm, w_fm = selected_feature_map.shape
+
+        # Ensure all tensors are on the same device
+        device = selected_feature_map.device
+        bboxes_abs_img_scale    = bboxes_abs_img_scale.to(device)
+        batch_indices_for_roi   = batch_indices_for_roi.to(device)
+        current_batch_img_shapes = current_batch_img_shapes.to(device)
+
+        H_img, W_img = current_batch_img_shapes[0].item(), current_batch_img_shapes[1].item()
+        # bboxes_abs_img_scale * [W,H,W,H] → 像素xywh
+        scale_img = torch.tensor([W_img, H_img, W_img, H_img],
+                                 device=device, dtype=bboxes_abs_img_scale.dtype)
+        pixel_xywh = bboxes_abs_img_scale * scale_img  # [N,4]
+        pixel_xyxy = xywh2xyxy(pixel_xywh) 
+
+        norm_xyxy = pixel_xyxy / scale_img        # [N,4]
+        fm_scale = torch.tensor([w_fm, h_fm, w_fm, h_fm], device=device)
+        rois_fm = norm_xyxy * fm_scale  
+
+        rois_fm[:, 0::2].clamp_(0, w_fm - 1)
+        rois_fm[:, 1::2].clamp_(0, h_fm - 1)
+
+        bad_w = rois_fm[:, 2] <= rois_fm[:, 0]
+        rois_fm[bad_w, 2] = rois_fm[bad_w, 0] + 1
+        bad_h = rois_fm[:, 3] <= rois_fm[:, 1]
+        rois_fm[bad_h, 3] = rois_fm[bad_h, 1] + 1
+
+
+        # Scale RoIs from original image coordinates to the selected feature map's coordinates
+        
+        roi_inputs = torch.cat([batch_indices_for_roi.to(device).unsqueeze(1).float(),
+                                rois_fm], dim=1)  # [N,5]
+
+        
+
+
+        # Prepare RoIs for roi_align: [K, 5] (batch_idx_in_feat_map_tensor, x1, y1, x2, y2)
+        roi_inputs = torch.cat([batch_indices_for_roi.unsqueeze(1).float(), rois_fm], dim=1)
+
+        if roi_inputs.numel() == 0: # Should be caught by bboxes_abs_img_scale.numel() == 0 earlier
+             return torch.empty(0, self.feature_dim, device=device)
+
+        # Perform RoI Align
+        patches = roi_align(selected_feature_map, roi_inputs,
+                            output_size=(self.roi_output_size, self.roi_output_size),
+                            aligned=True) 
+        # roi_aligned_patches shape: [N_roi, c_feat_map_for_roi, self.roi_output_size, self.roi_output_size]
+
+        # Encode the RoI-aligned patches
+        encoded_features = encoder(patches)  # Expected output: [N_roi, self.feature_dim]
+
+        # L2 Normalize the encoded features
+        normalized_features = F.normalize(encoded_features, p=2, dim=1)
+        return normalized_features
+
+    def forward(self, x_pyramid_from_neck: List[torch.Tensor], batch: dict = None):
+        """
+        Forward pass for DetectWithObjectMoCo.
+        Args:
+            x_pyramid_from_neck (List[torch.Tensor]): List of feature maps from FPN.
+            batch (dict, optional): Batch data containing GT info, needed for MoCo during training.
+                                    Expected keys: 'bboxes', 'cls', 'batch_idx', and image shape info.
+        Returns:
+            Tuple: During training: (det_head_outputs, raw_features_from_neck, 
+                                     moco_query_features, moco_key_features, 
+                                     moco_object_labels, moco_queue_snapshot)
+                   During inference: (detection_results, raw_features_from_neck)
+        """
+        # Clone raw features from neck for MoCo, as x_pyramid_from_neck might be modified by detection heads
+        raw_features_for_moco = [feat.clone() for feat in x_pyramid_from_neck]
+
+        # Standard YOLO detection head processing
+        det_head_outputs = []
+        for i in range(self.nl):  # self.nl is number of detection layers
+            det_head_outputs.append(torch.cat((self.cv2[i](x_pyramid_from_neck[i]), self.cv3[i](x_pyramid_from_neck[i])), 1))
+
+        # --- MoCo Feature Extraction (only during training and if GT is available) ---
+        moco_query_features = None
+        moco_key_features = None
+        moco_object_labels = None
+
+        if self.training and batch is not None and 'bboxes' in batch and 'cls' in batch and 'batch_idx' in batch:
+            gt_bboxes_img_scale = batch['bboxes']  # Expected [N_total_gt, 4] (xyxy absolute on input image)
+            # Ensure labels are 1D: [N_total_gt]
+            gt_labels = batch['cls'].view(-1) if batch['cls'].ndim > 1 else batch['cls']
+            batch_indices_for_gt = batch['batch_idx'].view(-1) if batch['batch_idx'].ndim > 1 else batch['batch_idx']
+
+            if gt_bboxes_img_scale.numel() > 0 and gt_labels.numel() > 0:
+                # Get current batch image shapes [BatchSize, 2] (H, W)
+                # This assumes batch['img'] is the augmented image tensor [B, C, H, W]
+                current_batch_img_shapes = torch.tensor([batch['img'].shape[-2], batch['img'].shape[-1]],device=batch['img'].device,dtype=torch.float)
+                # for i in range(batch['img'].shape[0]):
+                #     h_img, w_img = batch['img'][i].shape[1], batch['img'][i].shape[2]
+                #     current_batch_img_shapes_list.append(torch.tensor([h_img, w_img], device=batch['img'].device, dtype=torch.float))
+                # current_batch_img_shapes = torch.stack(current_batch_img_shapes_list)
+
+                # Extract Query Features
+                moco_query_features = self._extract_roi_encoded_features(
+                    raw_features_for_moco,
+                    gt_bboxes_img_scale,
+                    batch_indices_for_gt,
+                    current_batch_img_shapes,
+                    self.query_encoder
+                )
+
+                # Extract Key Features (with no_grad context for key_encoder path)
+                with torch.no_grad():
+                    self._momentum_update_key_encoder()  # Update key encoder parameters
+                    moco_key_features = self._extract_roi_encoded_features(
+                        raw_features_for_moco,
+                        gt_bboxes_img_scale,
+                        batch_indices_for_gt,
+                        current_batch_img_shapes,
+                        self.key_encoder
+                    )
+                
+                moco_object_labels = gt_labels
+
+                # Dequeue and Enqueue with detached key features
+                if moco_key_features is not None and moco_key_features.numel() > 0:
+                    self._dequeue_and_enqueue(moco_key_features.detach(), moco_object_labels)
+        
+        # --- Return appropriate outputs ---
+        if self.training:
+            # Pass all necessary components to the loss function
+            return (det_head_outputs, raw_features_for_moco, 
+                    moco_query_features, moco_key_features, 
+                    moco_object_labels, self.queue.clone().detach()) # Pass a snapshot of the queue
+        else:
+            # Standard inference path
+            # self._inference processes det_head_outputs to final detections
+            y_det_inference = self._inference(det_head_outputs) 
+            return y_det_inference if self.export else (y_det_inference, det_head_outputs)
+
+# ... (rest of the file, e.g., _make_grid, _inference methods if not fully inherited)
 
 
 class Segment(Detect):

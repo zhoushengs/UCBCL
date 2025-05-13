@@ -762,7 +762,6 @@ class v8CLloss:
 
         return loss.sum() * batch_size, loss.detach()  # loss(box, cls, dfl)
 
-
 class v8DetectionLoss:
     """Criterion class for computing training losses."""
 
@@ -873,6 +872,139 @@ class v8DetectionLoss:
 
         return loss.sum() * batch_size, loss.detach()  # loss(box, cls, dfl)
 
+
+class v8MoCoDetectionLoss(v8DetectionLoss):
+    """结合对象级MoCo对比学习的YOLO检测损失"""
+
+    def __init__(self, model, tal_topk=10, contrastive_weight=0.5):
+        """
+        初始化 v8MoCoDetectionLoss。
+        Args:
+            model: YOLO 模型实例。
+            tal_topk: 用于目标分配的 top-k 值。
+            contrastive_weight: 对比损失的权重。
+        """
+        super().__init__(model, tal_topk=tal_topk)
+        self.contrastive_weight = contrastive_weight
+        self.contrastive_loss_fn = nn.CrossEntropyLoss()  # 对比损失函数
+
+    def __call__(self, preds, batch):
+        """
+        计算总损失，包括检测损失和对比损失。
+        Args:
+            preds: 模型的预测输出。
+            batch: 包含目标信息的批次数据。
+        Returns:
+            total_loss: 总损失。
+            loss_items: 各项损失的详细信息。
+        """
+        # 解包预测值
+        if isinstance(preds, tuple) and len(preds) == 6:
+            det_head_outputs, raw_features, query_features, key_features, object_labels, queue_snapshot = preds
+
+            # 1. 计算标准检测损失
+            det_loss, det_loss_items = super().__call__((raw_features, det_head_outputs), batch)
+
+            # 2. 计算对比损失
+            cl_loss = torch.tensor(0.0, device=self.device)  # 初始化对比损失
+            if query_features is not None and key_features is not None and object_labels is not None:
+                if query_features.shape[0] > 1:  # 至少需要两个对象特征
+                    # 计算对比损失
+                    cl_loss = self._compute_contrastive_loss(query_features, key_features, object_labels, queue_snapshot)
+
+            # 3. 合并损失
+            total_loss = det_loss + self.contrastive_weight * cl_loss
+
+            # 4. 返回损失和详细信息
+            loss_items = torch.cat([det_loss_items, cl_loss.detach().unsqueeze(0)])
+            return total_loss, loss_items
+        else:
+            return super().__call__(preds, batch)
+
+    def _compute_contrastive_loss(self, query_features, key_features, object_labels, queue_snapshot):
+        """
+        计算对象级别的对比损失。
+        Args:
+            query_features: 查询特征 [N, feature_dim]。
+            key_features: 键特征 [N, feature_dim]。
+            object_labels: 对象标签 [N]。
+            queue_snapshot: MoCo 队列的快照 [num_classes, queue_size, feature_dim]。
+        Returns:
+            cl_loss: 对比损失值。
+        """
+        """
+        对同类别的 key_features（同 i）和 queue 中同 class 条目都视为 positives，
+        其它视为 negatives，计算 Supervised Contrastive Loss。
+        """
+        device = query_features.device
+
+        # 1. 归一化 query 和 key
+        q = F.normalize(query_features.to(device), dim=1)   # [N, D]
+        k = F.normalize(key_features.to(device),   dim=1)   # [N, D]
+        N, D = q.shape
+
+        # 2. 准备 memory bank 作为全部负样本
+        C, Qsize, _ = queue_snapshot.shape
+        neg_feats = queue_snapshot.to(device).view(C * Qsize, D)  # [M, D]
+
+        # 3. 计算相似度并 exponentiate
+        temp = getattr(self.hyp, 'temperature', 0.07)
+        sim_kk = torch.matmul(q, k.t()) / temp          # [N, N]
+        sim_qn = torch.matmul(q, neg_feats.t()) / temp  # [N, M]
+        exp_kk = torch.exp(sim_kk)                      # [N, N]
+        exp_qn = torch.exp(sim_qn)                      # [N, M]
+
+        # 4. 构造同 batch 正样本掩码（同类别且非自身）
+        labels = object_labels.to(device).view(-1, 1)   # [N,1]
+        raw_mask = labels.eq(labels.t())                # [N, N]
+        # 统计每行同类样本数
+        pos_counts = raw_mask.sum(1)                    # [N]
+        pos_mask = raw_mask.clone()
+        idx = torch.arange(N, device=device)
+        # 只有当某行除了自身外还有其它 positives 时，才将对角线置为 False
+        remove_idx = idx[pos_counts > 1]
+        pos_mask[remove_idx, remove_idx] = False
+
+        # 5. 分别求 positives 和 negatives 的总和
+        pos_sum = (exp_kk * pos_mask.float()).sum(1)    # [N]
+
+        queue_labels = torch.arange(C, device=device).unsqueeze(1).repeat(1, Qsize).view(-1)  # [M]
+        # neg_mask[i,j]=True 当 queue_labels[j]!=object_labels[i]
+        neg_mask = queue_labels.view(1, -1).ne(labels)                   # [N, M]
+        neg_sum = (exp_qn * neg_mask.float()).sum(1)  
+           
+
+        # 6. 计算 InfoNCE 损失：−log(pos / (pos + neg))
+        eps = 1e-8
+        loss = -torch.log((pos_sum + eps) / (pos_sum + neg_sum + eps))
+        return loss.mean()
+
+
+
+        # 3. 构造 pool = all batch-keys (positives) + flat_queue
+        pool_feat = torch.cat([k, flat_queue], dim=0)                     # [N+M, D]
+        pool_labels = torch.cat([object_labels, queue_labels], dim=0)     # [N+M]
+
+        # 4. 相似度矩阵
+        temp = getattr(self.hyp, 'temperature', 0.07)
+        sim = torch.matmul(q, pool_feat.t()) / temp                       # [N, N+M]
+
+        # 5. 同/异 类掩码
+        labels_q = object_labels.view(-1, 1)                              # [N,1]
+        mask_pos = pool_labels.view(1, -1).eq(labels_q)                   # [N, N+M]
+        # 排除 query 自身与 key_features 对角线位置
+        idx = torch.arange(q.size(0), device=q.device)
+        mask_pos[idx, idx] = False
+
+        # 6. 计算 SupCon Loss
+        exp_sim = torch.exp(sim)                                          # [N, N+M]
+        # 分子：每行同 class 的 exp_sim 求和；分母：整行 exp_sim 求和
+        pos_exp = (exp_sim * mask_pos.float()).sum(1)                     # [N]
+        all_exp = exp_sim.sum(1)                                          # [N]
+        # 避免除 0
+        eps = 1e-8
+        loss_per_sample = -torch.log((pos_exp + eps) / (all_exp + eps))   # [N]
+        return loss_per_sample.mean()
 
 class v8SegmentationLoss(v8DetectionLoss):
     """Criterion class for computing training losses."""

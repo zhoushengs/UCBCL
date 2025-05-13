@@ -76,7 +76,7 @@ from .conv import (
     WGAFM,
     WGAFMdown,
 )
-from .head import OBB, Classify, Detect, Pose, RTDETRDecoder, Segment, WorldDetect, v10Detect
+from .head import OBB, Classify, Detect, Pose, RTDETRDecoder, Segment, WorldDetect, v10Detect,DetectWithObjectMoCo
 from .transformer import (
     AIFI,
     MLP,

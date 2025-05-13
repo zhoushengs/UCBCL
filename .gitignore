@@ -177,6 +177,6 @@ calibration_*.npy
 train_VisDrone.py
 train_on_cc.py
 *.sh
-
+/test.py
 /train.py
 *.pth
