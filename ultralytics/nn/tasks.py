@@ -92,6 +92,8 @@ from ultralytics.utils.torch_utils import (
 )
 from ultralytics.nn.extra_modules import (fasternet_t0,fasternet_t0_dw,fasternet_t1_dw,fasternet_t1,fasternet_l
                                           )
+from ultralytics.utils.plotting import plot_query_distribution,save_query_distribution
+
 
 try:
     import thop
@@ -298,7 +300,7 @@ class BaseModel(nn.Module):
         if verbose:
             LOGGER.info(f"Transferred {len(csd)}/{len(self.model.state_dict())} items from pretrained weights")
 
-    def loss(self, batch, preds=None):
+    def loss(self, batch, preds=None,epoch=None,dir=None):
         """
         Compute loss.
 
@@ -328,7 +330,10 @@ class BaseModel(nn.Module):
         if isinstance(preds, tuple) and len(preds) == 6:
             # preds 包含 (det_head_outputs, raw_features, query_features, key_features, object_labels, queue_snapshot)
             det_head_outputs, raw_features, query_features, key_features, object_labels, queue_snapshot = preds
-
+            if (epoch+1)%10==0:
+                save_query_distribution(epoch, query_features, object_labels,
+                     
+                        out_path=f"{dir}/feat_dist_epoch{epoch+1}.npz")
             # 调用 v8MoCoDetectionLoss 计算损失
             return self.criterion(
                 (det_head_outputs, raw_features, query_features, key_features, object_labels, queue_snapshot), batch

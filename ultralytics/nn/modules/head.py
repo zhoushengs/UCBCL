@@ -176,7 +176,7 @@ from torchvision.ops import roi_align
 import torch.nn.functional as F
 
 class DetectWithObjectMoCo(Detect):
-    def __init__(self, nc=80, ch=(), queue_size=64, momentum=0.999, feature_dim=256, roi_output_size=7):
+    def __init__(self, nc=80, ch=(), queue_size=4096, momentum=0.999, feature_dim=64, roi_output_size=7):
         """
         Detection head with MoCo for object-level contrastive learning.
         Args:
@@ -195,7 +195,7 @@ class DetectWithObjectMoCo(Detect):
         self.momentum = momentum
         self.queue_size = queue_size
         self.nc = nc
-
+        self.hidden_dim = 2*feature_dim  # Hidden dimension for the transformer decoder
         # Determine the number of channels of the feature map used for RoIAlign.
         # We'll use the feature map from the first FPN level (e.g., P3),
         # which corresponds to ch[0] if ch is (c_p3, c_p4, c_p5).
@@ -213,10 +213,10 @@ class DetectWithObjectMoCo(Detect):
             nn.AdaptiveAvgPool2d((1, 1)),  # Output: [N, feature_dim, 1, 1]
             nn.Flatten(),  # Output: [N, feature_dim]
             # MoCo projection head
-            nn.Linear(self.feature_dim, self.feature_dim, bias=False),
-            nn.BatchNorm1d(self.feature_dim), # BN after linear for projection
+            nn.Linear(self.feature_dim, self.hidden_dim, bias=False),
+            nn.BatchNorm1d(self.hidden_dim), # BN after linear for projection
             nn.ReLU(inplace=True),
-            nn.Linear(self.feature_dim, self.feature_dim, bias=True) # Final projection
+            nn.Linear(self.hidden_dim, self.feature_dim, bias=True) # Final projection
         )
         self.query_encoder = common_encoder_layers(c_feat_map_for_roi)
         self.key_encoder = common_encoder_layers(c_feat_map_for_roi)

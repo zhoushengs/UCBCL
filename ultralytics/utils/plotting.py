@@ -16,6 +16,11 @@ from ultralytics.utils import IS_COLAB, IS_KAGGLE, LOGGER, TryExcept, ops, plt_s
 from ultralytics.utils.checks import check_font, check_version, is_ascii
 from ultralytics.utils.files import increment_path
 
+import matplotlib.pyplot as plt
+from sklearn.manifold import TSNE
+from sklearn.decomposition import PCA
+import os
+import pandas as pd
 
 class Colors:
     """
@@ -1376,3 +1381,47 @@ def feature_visualization(x, module_type, stage, n=32, save_dir=Path("runs/detec
             plt.savefig(f, dpi=300, bbox_inches="tight")
             plt.close()
             np.save(str(f.with_suffix(".npy")), x[0].cpu().numpy())  # npy save
+
+def plot_query_distribution(features, labels, method='tsne', save_path='query_feat_dist.png'):
+    """
+    将 query encoder 特征降维并画散点图。
+    Args:
+        features: Tensor[N, D]
+        labels:   Tensor[N]
+    """
+    x = features.detach().cpu().numpy()
+    y = labels.detach().cpu().numpy()
+    if method == 'tsne':
+        reducer = TSNE(n_components=2, init='pca', random_state=42, metric='cosine')
+    else:
+        reducer = PCA(n_components=2)
+    x2 = reducer.fit_transform(x)
+    plt.figure(figsize=(6,6))
+    sc = plt.scatter(x2[:,0], x2[:,1], c=y, cmap='tab20', s=5)
+    plt.colorbar(sc, label='class')
+    plt.title(f'Query Feature Distribution ({method.upper()})')
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300)
+    plt.close()
+
+def save_query_distribution(epoch,features, labels,
+                            out_path=None):
+   
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    f = features.detach().cpu().numpy()  # [B, D]
+    l = labels.detach().cpu().numpy()    # [B]
+
+    # 第一次调用时，新建文件；后续调用时加载并 append
+    if not os.path.exists(out_path):
+        np.savez_compressed(out_path,
+                            epoch   = np.full(len(f), epoch + 1, dtype=np.int32),
+                            features= f,
+                            labels  = l)
+    else:
+        data = np.load(out_path)
+        ep0, feat0, lbl0 = data['epoch'], data['features'], data['labels']
+        np.savez_compressed(out_path,
+            epoch    = np.concatenate([ep0,   np.full(len(f), epoch + 1, dtype=np.int32)], axis=0),
+            features = np.concatenate([feat0, f], axis=0),
+            labels   = np.concatenate([lbl0,   l], axis=0)
+        )

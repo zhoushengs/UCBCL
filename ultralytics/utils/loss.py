@@ -876,7 +876,7 @@ class v8DetectionLoss:
 class v8MoCoDetectionLoss(v8DetectionLoss):
     """结合对象级MoCo对比学习的YOLO检测损失"""
 
-    def __init__(self, model, tal_topk=10, contrastive_weight=0.5):
+    def __init__(self, model, tal_topk=10, contrastive_weight=1):
         """
         初始化 v8MoCoDetectionLoss。
         Args:
