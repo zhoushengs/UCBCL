@@ -330,7 +330,7 @@ class BaseModel(nn.Module):
         if isinstance(preds, tuple) and len(preds) == 6:
             # preds 包含 (det_head_outputs, raw_features, query_features, key_features, object_labels, queue_snapshot)
             det_head_outputs, raw_features, query_features, key_features, object_labels, queue_snapshot = preds
-            if (epoch+1)%10==0:
+            if (epoch+1)%100==0:
                 save_query_distribution(epoch, query_features, object_labels,
                      
                         out_path=f"{dir}/feat_dist_epoch{epoch+1}.npz")
