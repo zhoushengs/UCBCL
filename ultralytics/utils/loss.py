@@ -971,11 +971,14 @@ class v8MoCoDetectionLoss(v8DetectionLoss):
         #pos_sum = (exp_kk * pos_mask.float()).sum(1)    # [N]
         #pos_sum = exp_kk.sum(1)  # [N]  # 直接使用所有 positives 的总和
         pos_sum = (exp_kk * pos_mask).sum(1)  
+
+        batch_neg_mask = 1 - pos_mask 
+        batch_neg_sum = (exp_kk * batch_neg_mask).sum(1)  # [N, N]
         queue_labels = torch.arange(C, device=device).unsqueeze(1).repeat(1, Qsize).view(-1)  # [M]
         # neg_mask[i,j]=True 当 queue_labels[j]!=object_labels[i]
         neg_mask = queue_labels.view(1, -1).ne(labels)                   # [N, M]
-        neg_sum = (exp_qn * neg_mask.float()).sum(1)  
-           
+        queue_neg_sum = (exp_qn * neg_mask.float()).sum(1)  
+        neg_sum = queue_neg_sum + batch_neg_sum  # [N]  # 将 batch 内 negatives 和 queue 中 negatives 相加
 
         # 6. 计算 InfoNCE 损失：−log(pos / (pos + neg))
         eps = 1e-8
