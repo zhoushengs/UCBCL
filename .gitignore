@@ -180,3 +180,4 @@ train_on_cc.py
 /test.py
 /train.py
 *.pth
+/*.py
