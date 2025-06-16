@@ -940,7 +940,8 @@ class v8MoCoDetectionLoss(v8DetectionLoss):
 
         # 1. 归一化 query 和 key
         q = F.normalize(query_features.to(device), dim=1)   # [N, D]
-        k = F.normalize(key_features.to(device),   dim=1)   # [N, D]
+        k = F.normalize(key_features.to(device),   dim=1) 
+        k = k.detach()  # [N, D]
         N, D = q.shape
 
         # 2. 准备 memory bank 作为全部负样本
@@ -956,18 +957,20 @@ class v8MoCoDetectionLoss(v8DetectionLoss):
 
         # 4. 构造同 batch 正样本掩码（同类别且非自身）
         labels = object_labels.to(device).view(-1, 1)   # [N,1]
-        raw_mask = labels.eq(labels.t())                # [N, N]
+        pos_mask = labels.eq(labels.t()).float()   
+        # raw_mask = labels.eq(labels.t())                # [N, N]
         # 统计每行同类样本数
-        pos_counts = raw_mask.sum(1)                    # [N]
-        pos_mask = raw_mask.clone()
-        idx = torch.arange(N, device=device)
+        # pos_counts = raw_mask.sum(1)                    # [N]
+        # pos_mask = raw_mask.clone()
+        # idx = torch.arange(N, device=device)
         # 只有当某行除了自身外还有其它 positives 时，才将对角线置为 False
-        remove_idx = idx[pos_counts > 1]
-        pos_mask[remove_idx, remove_idx] = False
+        # remove_idx = idx[pos_counts > 1]
+        # pos_mask[remove_idx, remove_idx] = False
 
         # 5. 分别求 positives 和 negatives 的总和
-        pos_sum = (exp_kk * pos_mask.float()).sum(1)    # [N]
-
+        #pos_sum = (exp_kk * pos_mask.float()).sum(1)    # [N]
+        #pos_sum = exp_kk.sum(1)  # [N]  # 直接使用所有 positives 的总和
+        pos_sum = (exp_kk * pos_mask).sum(1)  
         queue_labels = torch.arange(C, device=device).unsqueeze(1).repeat(1, Qsize).view(-1)  # [M]
         # neg_mask[i,j]=True 当 queue_labels[j]!=object_labels[i]
         neg_mask = queue_labels.view(1, -1).ne(labels)                   # [N, M]
@@ -977,7 +980,17 @@ class v8MoCoDetectionLoss(v8DetectionLoss):
         # 6. 计算 InfoNCE 损失：−log(pos / (pos + neg))
         eps = 1e-8
         loss = -torch.log((pos_sum + eps) / (pos_sum + neg_sum + eps))
-        return loss.mean()
+        unique_labels, counts = torch.unique(object_labels, return_counts=True)
+        weights_tensor = 1.0 / (counts.float() + 1e-8)
+        sample_weight = torch.zeros_like(object_labels, dtype=torch.float, device=device)
+        for label, w in zip(unique_labels, weights_tensor):
+            sample_weight[object_labels == label] = w
+
+        # 然后计算 loss 时乘上权重，再做归一化
+        loss = (loss * sample_weight).sum() / (sample_weight.sum()+ 1e-8)
+        return loss
+                                                     
+        #return loss.mean()
 
 
 

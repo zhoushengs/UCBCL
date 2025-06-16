@@ -206,6 +206,11 @@ class DetectWithObjectMoCo(Detect):
         # Define Query and Key Encoders
         # Input: [N, c_feat_map_for_roi, roi_output_size, roi_output_size]
         # Output: [N, feature_dim]
+        self.dim_map = nn.Sequential(
+            nn.Conv2d(c_feat_map_for_roi*2, c_feat_map_for_roi, kernel_size=1, bias=False),
+            nn.BatchNorm2d(c_feat_map_for_roi),
+            nn.ReLU(inplace=True)
+        ) 
         common_encoder_layers = lambda in_c: nn.Sequential(
             nn.Conv2d(in_c, self.feature_dim, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(self.feature_dim),
@@ -283,8 +288,11 @@ class DetectWithObjectMoCo(Detect):
             return torch.empty(0, self.feature_dim, device=feature_maps_from_neck[0].device)
 
         # Use the P3 feature map (smallest stride, highest resolution) for RoIAlign
-        selected_feature_map = feature_maps_from_neck[0]
+        selected_feature_map = feature_maps_from_neck
         _bs, _c_fm, h_fm, w_fm = selected_feature_map.shape
+
+        # selected_feature_map2 = feature_maps_from_neck[1]
+        # _bs2, _c_fm2, h_fm2, w_fm2 = selected_feature_map2.shape
 
         # Ensure all tensors are on the same device
         device = selected_feature_map.device
@@ -311,32 +319,47 @@ class DetectWithObjectMoCo(Detect):
         bad_h = rois_fm[:, 3] <= rois_fm[:, 1]
         rois_fm[bad_h, 3] = rois_fm[bad_h, 1] + 1
 
+        # rois_fm2 = norm_xyxy * torch.tensor([w_fm2, h_fm2, w_fm2, h_fm2], device=device)
+        # rois_fm2[:, 0::2].clamp_(0, w_fm2 - 1)
+        # rois_fm2[:, 1::2].clamp_(0, h_fm2 - 1)
+
+        # bad_w2 = rois_fm2[:, 2] <= rois_fm2[:, 0]
+        # rois_fm2[bad_w2, 2] = rois_fm2[bad_w2, 0] + 1
+        # bad_h2 = rois_fm2[:, 3] <= rois_fm2[:, 1]
+        # rois_fm2[bad_h2, 3] = rois_fm2[bad_h2, 1] + 1
 
         # Scale RoIs from original image coordinates to the selected feature map's coordinates
         
         roi_inputs = torch.cat([batch_indices_for_roi.to(device).unsqueeze(1).float(),
                                 rois_fm], dim=1)  # [N,5]
 
-        
-
+        # roi_inputs2 = torch.cat([batch_indices_for_roi.to(device).unsqueeze(1).float(),
+        #                           rois_fm2], dim=1)  # [N,5]
 
         # Prepare RoIs for roi_align: [K, 5] (batch_idx_in_feat_map_tensor, x1, y1, x2, y2)
         roi_inputs = torch.cat([batch_indices_for_roi.unsqueeze(1).float(), rois_fm], dim=1)
-
+        # roi_inputs2 = torch.cat([batch_indices_for_roi.unsqueeze(1).float(), rois_fm2], dim=1)
+        
         if roi_inputs.numel() == 0: # Should be caught by bboxes_abs_img_scale.numel() == 0 earlier
              return torch.empty(0, self.feature_dim, device=device)
-
+        # if roi_inputs2.numel() == 0: # Should be caught by bboxes_abs_img_scale.numel() == 0 earlier
+        #      return torch.empty(0, self.feature_dim, device=device)
+        
         # Perform RoI Align
         patches = roi_align(selected_feature_map, roi_inputs,
                             output_size=(self.roi_output_size, self.roi_output_size),
                             aligned=True) 
         # roi_aligned_patches shape: [N_roi, c_feat_map_for_roi, self.roi_output_size, self.roi_output_size]
-
+        # patches2 = roi_align(selected_feature_map2, roi_inputs2,
+        #                      output_size=(self.roi_output_size, self.roi_output_size),
+        #                      aligned=True)
         # Encode the RoI-aligned patches
         encoded_features = encoder(patches)  # Expected output: [N_roi, self.feature_dim]
+        #encoded_features2 = encoder(self.dim_map(patches2))  # Expected output: [N_roi, self.feature_dim]
 
         # L2 Normalize the encoded features
         normalized_features = F.normalize(encoded_features, p=2, dim=1)
+        #normalized_features2 = F.normalize(encoded_features2, p=2, dim=1)
         return normalized_features
 
     def forward(self, x_pyramid_from_neck: List[torch.Tensor], batch: dict = None):
@@ -382,18 +405,18 @@ class DetectWithObjectMoCo(Detect):
 
                 # Extract Query Features
                 moco_query_features = self._extract_roi_encoded_features(
-                    raw_features_for_moco,
+                    raw_features_for_moco[0],
                     gt_bboxes_img_scale,
                     batch_indices_for_gt,
                     current_batch_img_shapes,
                     self.query_encoder
                 )
-
+                key_input_features = self.dim_map(raw_features_for_moco[1])  # Apply dim_map to the first feature map
                 # Extract Key Features (with no_grad context for key_encoder path)
                 with torch.no_grad():
                     self._momentum_update_key_encoder()  # Update key encoder parameters
                     moco_key_features = self._extract_roi_encoded_features(
-                        raw_features_for_moco,
+                        key_input_features,
                         gt_bboxes_img_scale,
                         batch_indices_for_gt,
                         current_batch_img_shapes,
@@ -401,6 +424,7 @@ class DetectWithObjectMoCo(Detect):
                     )
                 
                 moco_object_labels = gt_labels
+                #moco_object_labels = torch.cat([gt_labels, gt_labels], dim=0)
 
                 # Dequeue and Enqueue with detached key features
                 if moco_key_features is not None and moco_key_features.numel() > 0:
