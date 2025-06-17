@@ -434,6 +434,7 @@ class BaseTrainer:
                 # Validation
                 if self.args.val or final_epoch or self.stopper.possible_stop or self.stop:
                     self.metrics, self.fitness = self.validate()
+                    self.test()
                 self.save_metrics(metrics={**self.label_loss_items(self.tloss), **self.metrics, **self.lr})
                 self.stop |= self.stopper(epoch + 1, self.fitness) or final_epoch
                 if self.args.time:
@@ -610,6 +611,18 @@ class BaseTrainer:
         fitness = metrics.pop("fitness", -self.loss.detach().cpu().numpy())  # use loss as fitness measure if not found
         if not self.best_fitness or self.best_fitness < fitness:
             self.best_fitness = fitness
+        return metrics, fitness
+
+    def test(self):
+        """
+        Runs test on test set using self.testor.
+
+        The returned dict is expected to contain "fitness" key.
+        """
+        metrics = self.testor(self)
+        fitness = metrics.pop("fitness", -self.loss.detach().cpu().numpy())  # use loss as fitness measure if not found
+        # if not self.best_fitness or self.best_fitness < fitness:
+        #     self.best_fitness = fitness
         return metrics, fitness
 
     def get_model(self, cfg=None, weights=None, verbose=True):
