@@ -970,6 +970,14 @@ class v8MoCoDetectionLoss(v8DetectionLoss):
         # 5. 分别求 positives 和 negatives 的总和
         #pos_sum = (exp_kk * pos_mask.float()).sum(1)    # [N]
         #pos_sum = exp_kk.sum(1)  # [N]  # 直接使用所有 positives 的总和
+
+        pos_counts = pos_mask.sum(1)    
+        idx = torch.arange(N, device=device)
+        # 只有当某行除了自身外还有其它 positives 时，才将对角线置为 False
+        remove_idx = idx[pos_counts > 1]
+        pos_mask[remove_idx, remove_idx] = 0
+
+
         pos_sum = (exp_kk * pos_mask).sum(1)  
 
         batch_neg_mask = 1 - pos_mask 
