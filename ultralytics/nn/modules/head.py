@@ -190,7 +190,7 @@ class DetectWithObjectMoCo(Detect):
         """
         super().__init__(nc=nc, ch=ch)  # Initialize parent Detect class
 
-        self.feature_dim = feature_dim
+        self.feature_dim = ch[0]*2
         self.roi_output_size = roi_output_size
         self.momentum = momentum
         self.queue_size = queue_size
