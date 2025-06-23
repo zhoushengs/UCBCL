@@ -57,6 +57,7 @@ from .block import (
     ResNetLayer,
     SCDown,
     TorchVision,
+    GSConv, GSConvns, VoVGSCSP, VoVGSCSPns, VoVGSCSPC,
 )
 from .conv import (
     CBAM,
@@ -164,4 +165,5 @@ __all__ = (
     "Index",
     "WGAFM",
     "WGAFMdown",
+    'GSConv', 'GSConvns', 'VoVGSCSP', 'VoVGSCSPns', 'VoVGSCSPC'
 )
