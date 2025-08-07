@@ -176,7 +176,7 @@ from torchvision.ops import roi_align
 import torch.nn.functional as F
 
 class DetectWithObjectMoCo(Detect):
-    def __init__(self, nc=80, ch=(), queue_size=128, momentum=0.999, feature_dim=128, roi_output_size=7):
+    def __init__(self, nc=80, ch=(), queue_size=128, momentum=0.9, feature_dim=128, roi_output_size=7):
         """
         Detection head with MoCo for object-level contrastive learning.
         Args:
