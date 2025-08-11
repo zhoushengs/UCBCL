@@ -934,7 +934,7 @@ class v8MoCoDetectionLoss(v8DetectionLoss):
         """
         """
         对同类别的 key_features（同 i）和 queue 中同 class 条目都视为 positives，
-        其它视为 negatives，计算 Supervised Contrastive Loss。
+其它视为 negatives，计算 Supervised Contrastive Loss。
         """
         device = query_features.device
 
@@ -950,7 +950,7 @@ class v8MoCoDetectionLoss(v8DetectionLoss):
 
         # 3. 计算相似度并 exponentiate
         temp = getattr(self.hyp, 'temperature', 0.07)
-        sim_kk = torch.matmul(q, k.t()) / temp          # [N, N]
+        sim_kk = torch.matmul(q, k.t()) / temp          # [N, N]d
         sim_qn = torch.matmul(q, neg_feats.t()) / temp  # [N, M]
         exp_kk = torch.exp(sim_kk)                      # [N, N]
         exp_qn = torch.exp(sim_qn)                      # [N, M]
