@@ -15,7 +15,7 @@ from .conv import Conv, DWConv
 from .transformer import MLP, DeformableTransformerDecoder, DeformableTransformerDecoderLayer
 from .utils import bias_init_with_prob, linear_init
 
-__all__ = "Detect", "Segment", "Pose", "Classify", "OBB", "RTDETRDecoder", "v10Detect", "DetectWithObjectMoCo"
+__all__ = "Detect", "Segment", "Pose", "Classify", "OBB", "RTDETRDecoder", "v10Detect", "DetectWithObjectMoCo","DetectWithMoCoBK"
 
 
 class Detect(nn.Module):
@@ -443,6 +443,92 @@ class DetectWithObjectMoCo(Detect):
             return y_det_inference if self.export else (y_det_inference, det_head_outputs)
 
 # ... (rest of the file, e.g., _make_grid, _inference methods if not fully inherited)
+
+class DetectWithMoCoBK(DetectWithObjectMoCo):
+    """YOLO Detection head with MoCo and Backbone Knowledge distillation."""
+
+    def __init__(self, nc=80, ch=()):
+        super().__init__(nc, ch)    
+    
+    def forward(self, x_pyramid_from_neck: List[torch.Tensor], batch: dict = None):
+        """
+        Forward pass for DetectWithObjectMoCo.
+        Args:
+            x_pyramid_from_neck (List[torch.Tensor]): List of feature maps from FPN.
+            batch (dict, optional): Batch data containing GT info, needed for MoCo during training.
+                                    Expected keys: 'bboxes', 'cls', 'batch_idx', and image shape info.
+        Returns:
+            Tuple: During training: (det_head_outputs, raw_features_from_neck, 
+                                     moco_query_features, moco_key_features, 
+                                     moco_object_labels, moco_queue_snapshot)
+                   During inference: (detection_results, raw_features_from_neck)
+        """
+        # Clone raw features from neck for MoCo, as x_pyramid_from_neck might be modified by detection heads
+        raw_features_for_moco = [feat.clone() for feat in x_pyramid_from_neck[:2]]
+
+        # Standard YOLO detection head processing
+        det_head_outputs = []
+        for i in range(2, self.nl):  # self.nl is number of detection layers
+            det_head_outputs.append(torch.cat((self.cv2[i](x_pyramid_from_neck[i]), self.cv3[i](x_pyramid_from_neck[i])), 1))
+
+        # --- MoCo Feature Extraction (only during training and if GT is available) ---
+        moco_query_features = None
+        moco_key_features = None
+        moco_object_labels = None
+
+        if self.training and batch is not None and 'bboxes' in batch and 'cls' in batch and 'batch_idx' in batch:
+            gt_bboxes_img_scale = batch['bboxes']  # Expected [N_total_gt, 4] (xyxy absolute on input image)
+            # Ensure labels are 1D: [N_total_gt]
+            gt_labels = batch['cls'].view(-1) if batch['cls'].ndim > 1 else batch['cls']
+            batch_indices_for_gt = batch['batch_idx'].view(-1) if batch['batch_idx'].ndim > 1 else batch['batch_idx']
+
+            if gt_bboxes_img_scale.numel() > 0 and gt_labels.numel() > 0:
+                # Get current batch image shapes [BatchSize, 2] (H, W)
+                # This assumes batch['img'] is the augmented image tensor [B, C, H, W]
+                current_batch_img_shapes = torch.tensor([batch['img'].shape[-2], batch['img'].shape[-1]],device=batch['img'].device,dtype=torch.float)
+                # for i in range(batch['img'].shape[0]):
+                #     h_img, w_img = batch['img'][i].shape[1], batch['img'][i].shape[2]
+                #     current_batch_img_shapes_list.append(torch.tensor([h_img, w_img], device=batch['img'].device, dtype=torch.float))
+                # current_batch_img_shapes = torch.stack(current_batch_img_shapes_list)
+
+                # Extract Query Features
+                moco_query_features = self._extract_roi_encoded_features(
+                    raw_features_for_moco[0],
+                    gt_bboxes_img_scale,
+                    batch_indices_for_gt,
+                    current_batch_img_shapes,
+                    self.query_encoder
+                )
+                key_input_features = self.dim_map(raw_features_for_moco[1])  # Apply dim_map to the first feature map
+                # Extract Key Features (with no_grad context for key_encoder path)
+                with torch.no_grad():
+                    self._momentum_update_key_encoder()  # Update key encoder parameters
+                    moco_key_features = self._extract_roi_encoded_features(
+                        key_input_features,
+                        gt_bboxes_img_scale,
+                        batch_indices_for_gt,
+                        current_batch_img_shapes,
+                        self.key_encoder
+                    )
+                
+                moco_object_labels = gt_labels
+                #moco_object_labels = torch.cat([gt_labels, gt_labels], dim=0)
+
+                # Dequeue and Enqueue with detached key features
+                if moco_key_features is not None and moco_key_features.numel() > 0:
+                    self._dequeue_and_enqueue(moco_key_features.detach(), moco_object_labels)
+        
+        # --- Return appropriate outputs ---
+        if self.training:
+            # Pass all necessary components to the loss function
+            return (det_head_outputs, raw_features_for_moco, 
+                    moco_query_features, moco_key_features, 
+                    moco_object_labels, self.queue.clone().detach()) # Pass a snapshot of the queue
+        else:
+            # Standard inference path
+            # self._inference processes det_head_outputs to final detections
+            y_det_inference = self._inference(det_head_outputs) 
+            return y_det_inference if self.export else (y_det_inference, det_head_outputs)
 
 
 class Segment(Detect):

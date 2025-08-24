@@ -77,7 +77,7 @@ from .conv import (
     WGAFM,
     WGAFMdown,
 )
-from .head import OBB, Classify, Detect, Pose, RTDETRDecoder, Segment, WorldDetect, v10Detect,DetectWithObjectMoCo
+from .head import OBB, Classify, Detect, Pose, RTDETRDecoder, Segment, WorldDetect, v10Detect,DetectWithObjectMoCo,DetectWithMoCoBK
 from .transformer import (
     AIFI,
     MLP,
@@ -146,6 +146,8 @@ __all__ = (
     "OBB",
     "WorldDetect",
     "v10Detect",
+    "DetectWithObjectMoCo",
+    "DetectWithMoCoBK",
     "ImagePoolingAttn",
     "ContrastiveHead",
     "BNContrastiveHead",
