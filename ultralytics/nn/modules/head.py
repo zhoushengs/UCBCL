@@ -212,7 +212,15 @@ class DetectWithObjectMoCo(Detect):
             nn.ReLU(inplace=True)
         ) 
         common_encoder_layers = lambda in_c: nn.Sequential(
-            nn.Conv2d(in_c, self.feature_dim, kernel_size=3, padding=1, bias=False),
+            # nn.Conv2d(in_c, self.feature_dim, kernel_size=3, padding=1, bias=False),
+            # nn.BatchNorm2d(self.feature_dim),
+            # nn.ReLU(inplace=True),
+            # Depthwise Convolution
+            nn.Conv2d(in_c, in_c, kernel_size=3, padding=1, groups=in_c, bias=False),
+            nn.BatchNorm2d(in_c),
+            nn.ReLU(inplace=True),
+            # Pointwise Convolution (1x1)
+            nn.Conv2d(in_c, self.feature_dim, kernel_size=1, bias=False),
             nn.BatchNorm2d(self.feature_dim),
             nn.ReLU(inplace=True),
             nn.AdaptiveAvgPool2d((1, 1)),  # Output: [N, feature_dim, 1, 1]
