@@ -202,12 +202,12 @@ class DetectWithObjectMoCo(Detect):
         if not isinstance(ch, (list, tuple)) or not ch:
             raise ValueError("`ch` must be a non-empty list or tuple of channel numbers.")
         c_feat_map_for_roi = ch[0]
-
+        feature_dim_2 = ch[1]
         # Define Query and Key Encoders
         # Input: [N, c_feat_map_for_roi, roi_output_size, roi_output_size]
         # Output: [N, feature_dim]
         self.dim_map = nn.Sequential(
-            nn.Conv2d(c_feat_map_for_roi*2, c_feat_map_for_roi, kernel_size=1, bias=False),
+            nn.Conv2d(feature_dim_2, c_feat_map_for_roi, kernel_size=1, bias=False),
             nn.BatchNorm2d(c_feat_map_for_roi),
             nn.ReLU(inplace=True)
         ) 

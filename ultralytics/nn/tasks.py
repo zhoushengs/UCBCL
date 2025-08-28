@@ -93,6 +93,7 @@ from ultralytics.utils.torch_utils import (
 )
 from ultralytics.nn.extra_modules import (fasternet_t0,fasternet_t0_dw,fasternet_t1_dw,fasternet_t1,fasternet_l
                                           )
+from ultralytics.nn.extra_modules.mobilenetv4 import *
 from ultralytics.utils.plotting import plot_query_distribution,save_query_distribution
 
 
@@ -1099,7 +1100,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                 legacy = False
                 if scale in "mlx":
                     args[3] = True
-        elif m in {fasternet_t0,fasternet_t0_dw,fasternet_t1_dw,fasternet_t1,fasternet_l}:
+        elif m in {fasternet_t0,fasternet_t0_dw,fasternet_t1_dw,fasternet_t1,fasternet_l,MobileNetV4ConvSmall, MobileNetV4ConvMedium, MobileNetV4ConvLarge, MobileNetV4HybridMedium, MobileNetV4HybridLarge}:
             m = m(*args)
             c2 = m.channel
         elif m is AIFI:
