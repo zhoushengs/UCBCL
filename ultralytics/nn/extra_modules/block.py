@@ -6,9 +6,14 @@ from typing import List
 from torch import Tensor
 import os
 import numpy as np
+from .wtconv2d import *
 import torchvision
+from ..modules.block import *
 
-__all__ = ['PatchEmbed']
+__all__ = ['PatchEmbed',
+           'WTConv2d',
+           'C2f_WTConv']
+
 
 class PatchEmbed(nn.Module):
 
@@ -24,6 +29,17 @@ class PatchEmbed(nn.Module):
         x = self.norm(self.proj(x))
         return x
 
+class Bottleneck_WTConv(Bottleneck):
+    def __init__(self, c1, c2, shortcut=True, g=1, k=(3, 3), e=0.5):
+        super().__init__(c1, c2, shortcut, g, k, e)
+        c_ = int(c2 * e)  # hidden channels
+        # self.cv1 = WTConv2d(c1, c2)
+        self.cv2 = WTConv2d(c2, c2)
+
+class C2f_WTConv(C2f):
+    def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5):
+        super().__init__(c1, c2, n, shortcut, g, e)
+        self.m = nn.ModuleList(Bottleneck_WTConv(self.c, self.c, shortcut, g, k=(3, 3), e=1.0) for _ in range(n))
 
 
 class PatchMerging(nn.Module):
