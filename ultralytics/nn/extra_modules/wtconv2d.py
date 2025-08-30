@@ -195,8 +195,8 @@ class WTConv2d(nn.Module):
         self.dilation = 1
 
         self.wt_filter, self.iwt_filter = create_wavelet_filter(wt_type, in_channels, in_channels, torch.float)
-        self.wt_filter = nn.Parameter(self.wt_filter, requires_grad=False)
-        self.iwt_filter = nn.Parameter(self.iwt_filter, requires_grad=False)
+        self.wt_filter = nn.Parameter(self.wt_filter, requires_grad=True)
+        self.iwt_filter = nn.Parameter(self.iwt_filter, requires_grad=True)
 
         self.base_conv = nn.Conv2d(in_channels, in_channels, kernel_size, padding='same', stride=1, dilation=1, groups=in_channels, bias=bias)
         self.base_scale = _ScaleModule([1,in_channels,1,1])
