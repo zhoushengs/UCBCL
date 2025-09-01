@@ -1100,7 +1100,8 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                 legacy = False
                 if scale in "mlx":
                     args[3] = True
-        elif m in {fasternet_t0,fasternet_t0_dw,fasternet_t1_dw,fasternet_t1,fasternet_l,MobileNetV4ConvSmall, MobileNetV4ConvMedium, MobileNetV4ConvLarge, MobileNetV4HybridMedium, MobileNetV4HybridLarge}:
+        elif m in {fasternet_t0,fasternet_t0_dw,fasternet_t1_dw,fasternet_t1,fasternet_l,MobileNetV4ConvSmall, MobileNetV4ConvMedium, MobileNetV4ConvLarge, MobileNetV4HybridMedium, MobileNetV4HybridLarge,
+                   mambaout_femto, mambaout_kobe, mambaout_tiny, mambaout_small, mambaout_base,}:
             m = m(*args)
             c2 = m.channel
         elif m is AIFI:
