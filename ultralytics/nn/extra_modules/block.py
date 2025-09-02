@@ -10,11 +10,20 @@ from .wtconv2d import *
 import torchvision
 from ..modules.block import *
 from ..modules.conv import *
-
+from .MambaOut import GatedCNNBlock_BCHW
 __all__ = ['PatchEmbed',
            'WTConv2d',
-           'C2f_WTConv', 'HWD']
+           'C2f_WTConv', 'HWD', 'C2f_MambaOut']
 
+
+######################################## CVPR2025 MambaOut start ########################################
+
+class C2f_MambaOut(C2f):
+    def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5):
+        super().__init__(c1, c2, n, shortcut, g, e)
+        self.m = nn.ModuleList(GatedCNNBlock_BCHW(self.c) for _ in range(n))
+
+######################################## CVPR2025 MambaOut end ########################################
 
 ######################################## HWD start ########################################
 

@@ -91,8 +91,8 @@ from ultralytics.utils.torch_utils import (
     scale_img,
     time_sync,
 )
-from ultralytics.nn.extra_modules import (fasternet_t0,fasternet_t0_dw,fasternet_t1_dw,fasternet_t1,fasternet_l, C2f_WTConv, WTConv2d,HWD
-                                          )
+# from ultralytics.nn.extra_modules import (fasternet_t0,fasternet_t0_dw,fasternet_t1_dw,fasternet_t1,fasternet_l, C2f_WTConv, WTConv2d,HWD
+#                                           )
 from ultralytics.nn.extra_modules.mobilenetv4 import *
 from ultralytics.utils.plotting import plot_query_distribution,save_query_distribution
 from ultralytics.nn.extra_modules import *
@@ -1065,7 +1065,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             C2fCIB,
             WGAFM,
             WGAFMdown,
-            GSConv, GSConvns, VoVGSCSP, VoVGSCSPns, VoVGSCSPC, C2f_WTConv, WTConv2d,HWD
+            GSConv, GSConvns, VoVGSCSP, VoVGSCSPns, VoVGSCSPC, C2f_WTConv, WTConv2d, HWD, C2f_MambaOut
         }:
             c1, c2 = ch[f], args[0]
             if c2 != nc:  # if c2 not equal to number of classes (i.e. for Classify() output)
@@ -1092,7 +1092,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                 C2fPSA,
                 C2fCIB,
                 C2PSA,
-                VoVGSCSP, VoVGSCSPns, VoVGSCSPC,C2f_WTConv,
+                VoVGSCSP, VoVGSCSPns, VoVGSCSPC,C2f_WTConv, C2f_MambaOut
             }:
                 args.insert(2, n)  # number of repeats
                 n = 1
