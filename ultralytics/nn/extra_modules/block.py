@@ -11,9 +11,12 @@ import torchvision
 from ..modules.block import *
 from ..modules.conv import *
 from .MambaOut import GatedCNNBlock_BCHW
+
+import torch.nn.functional as F
+
 __all__ = ['PatchEmbed',
            'WTConv2d',
-           'C2f_WTConv', 'HWD', 'C2f_MambaOut']
+           'C2f_WTConv', 'HWD', 'C2f_MambaOut','C2f_EA']
 
 
 ######################################## CVPR2025 MambaOut start ########################################
@@ -24,6 +27,56 @@ class C2f_MambaOut(C2f):
         self.m = nn.ModuleList(GatedCNNBlock_BCHW(self.c) for _ in range(n))
 
 ######################################## CVPR2025 MambaOut end ########################################
+
+####  external
+
+
+
+class C2f_EA(C2f):
+    def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5):
+        super().__init__(c1, c2, n, shortcut, g, e)
+        self.m = nn.ModuleList(ExternalAttention(self.c) for _ in range(n))
+
+class ExternalAttention(nn.Module):
+
+    def __init__(self, d_model,S=64):
+        super().__init__()
+        self.mk=nn.Conv1d(d_model,S,1,bias=False)
+        self.mv=nn.Conv1d(S,d_model,1,bias=False)
+        self.softmax=nn.Softmax(dim=1)
+        self.init_weights()
+        self.conv = nn.Conv2d(d_model, d_model, 1, 1)
+
+
+    def init_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                init.kaiming_normal_(m.weight, mode='fan_out')
+                if m.bias is not None:
+                    init.constant_(m.bias, 0)
+            elif isinstance(m, nn.BatchNorm2d):
+                init.constant_(m.weight, 1)
+                init.constant_(m.bias, 0)
+            elif isinstance(m, nn.Linear):
+                init.normal_(m.weight, std=0.001)
+                if m.bias is not None:
+                    init.constant_(m.bias, 0)
+
+    def forward(self, x):
+        idn = x
+        b,c,h,w = x.shape
+        queries = x.view(b,c,h*w)
+        attn=self.mk(queries) #bs,n,S
+        attn=self.softmax(attn) #bs,n,S
+        attn=attn/torch.sum(attn,dim=2,keepdim=True) #bs,n,S
+        out=self.mv(attn) #bs,n,d_model
+        out = out.view(b, c, h, w)
+        out = self.conv(out)
+        out = F.relu(out)
+        out = out + idn
+
+
+        return out
 
 ######################################## HWD start ########################################
 
