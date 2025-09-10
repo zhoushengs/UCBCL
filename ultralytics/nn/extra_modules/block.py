@@ -45,7 +45,8 @@ class ExternalAttention(nn.Module):
         self.mv=nn.Conv1d(S,d_model,1,bias=False)
         self.softmax=nn.Softmax(dim=1)
         self.init_weights()
-        self.conv = nn.Conv2d(d_model, d_model, 1, 1)
+        self.conv1 = Conv(d_model, d_model, 1, 1)
+        self.conv2 = Conv(d_model, d_model, 1, 1)
 
 
     def init_weights(self):
@@ -64,6 +65,7 @@ class ExternalAttention(nn.Module):
 
     def forward(self, x):
         idn = x
+        x = self.conv1(x)
         b,c,h,w = x.shape
         queries = x.view(b,c,h*w)
         attn=self.mk(queries) #bs,n,S
@@ -71,8 +73,8 @@ class ExternalAttention(nn.Module):
         attn=attn/torch.sum(attn,dim=2,keepdim=True) #bs,n,S
         out=self.mv(attn) #bs,n,d_model
         out = out.view(b, c, h, w)
-        out = self.conv(out)
-        out = F.relu(out)
+        out = self.conv2(out)
+        #out = F.relu(out)
         out = out + idn
 
 
