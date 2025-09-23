@@ -137,7 +137,6 @@ class GatedCNNBlock(nn.Module):
         conv_channels = int(conv_ratio * dim)
         self.split_indices = (hidden, hidden - conv_channels, conv_channels)
         self.conv = nn.Conv2d(conv_channels, conv_channels, kernel_size=kernel_size, padding=kernel_size//2, groups=conv_channels)
-        self.norm2 = norm_layer(conv_channels)
         self.fc2 = nn.Linear(hidden, dim)
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
 
@@ -147,7 +146,6 @@ class GatedCNNBlock(nn.Module):
         g, i, c = torch.split(self.fc1(x), self.split_indices, dim=-1)
         c = c.permute(0, 3, 1, 2) # [B, H, W, C] -> [B, C, H, W]
         c = self.conv(c)
-        x = self.norm2(c)
         c = c.permute(0, 2, 3, 1) # [B, C, H, W] -> [B, H, W, C]
         x = self.fc2(self.act(g) * torch.cat((i, c), dim=-1))
         x = self.drop_path(x)
