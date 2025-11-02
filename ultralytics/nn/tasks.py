@@ -96,7 +96,7 @@ from ultralytics.utils.torch_utils import (
 from ultralytics.nn.extra_modules.mobilenetv4 import *
 from ultralytics.utils.plotting import plot_query_distribution,save_query_distribution
 from ultralytics.nn.extra_modules import *
-
+from ultralytics.nn.extra_modules.efficientViT import *
 try:
     import thop
 except ImportError:
@@ -1101,7 +1101,8 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                 if scale in "mlx":
                     args[3] = True
         elif m in {fasternet_t0,fasternet_t0_dw,fasternet_t1_dw,fasternet_t1,fasternet_l,MobileNetV4ConvSmall, MobileNetV4ConvMedium, MobileNetV4ConvLarge, MobileNetV4HybridMedium, MobileNetV4HybridLarge,
-                   mambaout_femto, mambaout_kobe, mambaout_tiny, mambaout_small, mambaout_base,}:
+                   mambaout_femto, mambaout_kobe, mambaout_tiny, mambaout_small, mambaout_base,
+                   EfficientViT_M0, EfficientViT_M1, EfficientViT_M2, EfficientViT_M3, EfficientViT_M4, EfficientViT_M5,}:
             m = m(*args)
             c2 = m.channel
         elif m is AIFI:
